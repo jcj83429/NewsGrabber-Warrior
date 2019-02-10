@@ -192,6 +192,42 @@ class DeduplicateWarcExtProcArgs(object):
         return realize(dedup_args, item)
 
 
+class WriteJobLog(SimpleTask):
+    def __init__(self):
+        SimpleTask.__init__(self, "WriteJobLog")
+
+    def process(self, item):
+        item_name = item['item_name']
+        item_type, item_value = item_name.split(':', 1)
+
+        list_url = 'http://master.newsbuddy.net/' + item_value
+        list_data = requests.get(list_url, timeout=3600)
+
+        if list_data.status_code != 200:
+            print("list_data.status_code = " + str(list_data.status_code))
+            return
+
+        seen_video_links = set()
+
+        try:
+            f = open("joblog.txt", "r")
+            for line in f:
+                seen_video_links.add(line.strip())
+            f.close()
+        except:
+            pass
+        print("had " + str(len(seen_video_links)) + " seen videos")
+
+        f = open("joblog.txt", "a")
+        for url in list_data.text.splitlines():
+            url = url.strip()
+            if url in seen_video_links:
+                continue
+            if "www.washingtonpost.com/post-live" in url:
+                print("adding " + url + " to joblog")
+                f.write(url + "\n")
+        f.close()
+
 def get_hash(filename):
     with open(filename, 'rb') as in_file:
         return hashlib.sha256(in_file.read()).hexdigest()
@@ -257,12 +293,31 @@ class WgetArgs(object):
             wpull_args.append(YOUTUBE_DL_EXE)
 
         list_url = 'http://master.newsbuddy.net/' + item_value
-        list_data = requests.get(list_url)
+        list_data = requests.get(list_url, timeout=3600)
+
+        seen_video_links = set()
+        try:
+            f = open("joblog.txt", "r")
+            for line in f:
+                seen_video_links.add(line.strip())
+            f.close()
+        except:
+            pass
+        print("loaded " + str(len(seen_video_links)) + " seen videos")
+
         #wpull_args.append(list_url)
+        has_urls = False
         if list_data.status_code == 200:
             for url in list_data.text.splitlines():
                 url = url.strip()
+                if url in seen_video_links:
+                    print(url + " already seen")
+                    continue
                 wpull_args.append(url)
+                has_urls = True
+
+        if not has_urls:
+            raise Exception("No URLs left after removing seen URLs")
 
         if 'bind_address' in globals():
             wpull_args.extend(['--bind-address', globals()['bind_address']])
@@ -294,11 +349,11 @@ pipeline = Pipeline(
     PrepareDirectories(warc_prefix="newsgrabber"),
     WgetDownload(
         WgetArgs(),
-        max_tries=2,
+        max_tries=5,
         accept_on_exit_code=[0, 4, 8]
     ),
     LimitConcurrent(
-        NumberConfigValue(min=1, max=20, default="1",
+        NumberConfigValue(min=1, max=20, default="20",
             name="shared:dedupe_threads", title="Deduplicate threads",
             description="The maximum number of concurrent dedupes."),
         DeduplicateWarcExtProc(
@@ -316,7 +371,7 @@ pipeline = Pipeline(
     ),
     MoveFiles(),
     LimitConcurrent(
-        NumberConfigValue(min=1, max=4, default="1",
+        NumberConfigValue(min=1, max=20, default="20",
             name="shared:rsync_threads", title="Rsync threads",
             description="The maximum number of concurrent uploads."),
         UploadWithTracker(
@@ -337,5 +392,6 @@ pipeline = Pipeline(
     SendDoneToTracker(
         tracker_url="http://%s/%s" % (TRACKER_HOST, TRACKER_ID),
         stats=ItemValue("stats")
-    )
+    ),
+    WriteJobLog()
 )
